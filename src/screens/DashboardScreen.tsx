@@ -17,9 +17,9 @@ import { HoldingItem, RealizedTrade, BrokerConfig } from '../types';
 import { useAuth } from '../context/AuthContext';
 import { BROKER_OPTIONS } from '../data/brokers';
 import { 
-  fetchStockQuote, 
-  fetchMultipleStockQuotes, 
-  getUsdToTwdRate, 
+  fetchStockQuote as originalFetchStockQuote, 
+  fetchMultipleStockQuotes as originalFetchMultipleStockQuotes, 
+  getUsdToTwdRate as originalGetUsdToTwdRate, 
   detectStockMarket, 
   POPULAR_STOCKS 
 } from '../services/stockService';
@@ -30,6 +30,49 @@ import {
   calculateHoldingUnrealized,
   isTradeRebateDue,
 } from '../utils/feeCalculator';
+
+// 🛡️ CORS 安全代理包裝函式（解決 Vercel 部署時 Yahoo 財經 CORS 阻擋問題）
+async function safeGetUsdToTwdRate(): Promise<number> {
+  try {
+    const rate = await originalGetUsdToTwdRate();
+    if (rate && rate > 0) return rate;
+  } catch (e) {
+    console.warn('originalGetUsdToTwdRate failed, trying CORS proxy fallback...', e);
+  }
+
+  try {
+    const targetUrl = encodeURIComponent('https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;fields=avgPrice,price,symbol;symbols=USDTWD=X');
+    const res = await fetch(`https://corsproxy.io/?${targetUrl}`);
+    const data = await res.json();
+    const price = data?.list?.[0]?.price;
+    if (price && typeof price === 'number' && price > 0) {
+      return price;
+    }
+  } catch (err) {
+    console.warn('CORS proxy fallback rate failed:', err);
+  }
+  return 32.4; // 預設安全匯率
+}
+
+async function safeFetchStockQuote(symbol: string) {
+  try {
+    const quote = await originalFetchStockQuote(symbol);
+    if (quote && quote.currentPrice > 0) return quote;
+  } catch (e) {
+    console.warn('originalFetchStockQuote failed:', e);
+  }
+  return null;
+}
+
+async function safeFetchMultipleStockQuotes(symbols: string[]) {
+  try {
+    const quotes = await originalFetchMultipleStockQuotes(symbols);
+    if (quotes && Object.keys(quotes).length > 0) return quotes;
+  } catch (e) {
+    console.warn('originalFetchMultipleStockQuotes failed:', e);
+  }
+  return {};
+}
 
 // 判斷指定 YYYY-MM-DD 日期在美國是否為夏令時間 (Daylight Saving Time)
 export function isUSDaylightSaving(dateStr: string): boolean {
@@ -450,7 +493,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
     };
 
     loadSavedData();
-    getUsdToTwdRate().then(rate => setUsdRate(rate));
+    safeGetUsdToTwdRate().then(rate => setUsdRate(rate));
   }, [user?.id]);
 
   useEffect(() => {
@@ -811,7 +854,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
     setQuoteStatusMsg({ type: 'loading', text: `⏳ 正在即時抓取【${codeToQuery}】最新市價與資訊...` });
 
     try {
-      const quote = await fetchStockQuote(codeToQuery);
+      const quote = await safeFetchStockQuote(codeToQuery);
       if (quote && quote.currentPrice > 0) {
         setFormMarket(quote.market);
         setFormCurrentPrice(formatWithCommas(quote.currentPrice.toString()));
@@ -859,7 +902,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
     setIsRefreshingAll(true);
     try {
       const codes = holdings.map(h => h.code);
-      const quotes = await fetchMultipleStockQuotes(codes);
+      const quotes = await safeFetchMultipleStockQuotes(codes);
       const nowStr = new Date().toLocaleTimeString('zh-TW', { hour12: false });
       
       const updatedHoldings = holdings.map(item => {
@@ -877,7 +920,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
       setHoldings(updatedHoldings);
       await AsyncStorage.setItem(getStorageKey('holdings'), JSON.stringify(updatedHoldings));
 
-      const rate = await getUsdToTwdRate();
+      const rate = await safeGetUsdToTwdRate();
       setUsdRate(rate);
       setLastRefreshedTime(nowStr);
     } catch (e) {
