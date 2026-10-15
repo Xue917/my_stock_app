@@ -31,6 +31,7 @@ function GlobalHeaderRight({ navigation }: { navigation: any }) {
 function MainTabs() {
   return (
     <Tab.Navigator
+      id="MainTabs"
       screenOptions={({ navigation }) => ({
         headerStyle: { backgroundColor: '#0a0a0a', borderBottomWidth: 1, borderBottomColor: '#262626', height: 60 },
         headerTintColor: '#ffffff',
@@ -62,7 +63,7 @@ function NavigationRoot() {
   }
 
   return (
-    <Stack.Navigator screenOptions={{ headerShown: false }}>
+    <Stack.Navigator id="RootStack" screenOptions={{ headerShown: false }}>
       {!session ? (
         <Stack.Screen name="Auth" component={AuthScreen} />
       ) : (
