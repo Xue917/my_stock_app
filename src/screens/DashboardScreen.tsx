@@ -1694,7 +1694,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
                 </View>
 
                 <View style={styles.itemActionGroup}>
-                  {/* 👇 新增領股息按鈕 */}
                   <TouchableOpacity style={styles.editBtn} onPress={() => handleOpenDividend(item)}>
                     <Text style={styles.editBtnText}>領股息</Text>
                   </TouchableOpacity>
@@ -1778,7 +1777,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
                   <Text style={styles.detailText}>買進 {sym}{item.buyPrice.toLocaleString()} ➔ 賣出 {sym}{item.sellPrice.toLocaleString()}</Text>
                 </View>
 
-                {/* 歷史紀錄刪除按鈕 */}
                 <View style={styles.itemActionGroup}>
                   <TouchableOpacity 
                     style={styles.deleteHistoryBtn} 
