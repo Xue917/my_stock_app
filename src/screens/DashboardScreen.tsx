@@ -52,9 +52,11 @@ export function isUSDaylightSaving(dateStr: string): boolean {
   return d >= dstStart && d < dstEnd;
 }
 
-// 取得可用的小時選項列表
+// 取得可用的小時選項列表 (首項為 NULL 未指定)
 export function getTradingHourOptions(market: 'TW' | 'US', dateStr: string): { label: string; value: string }[] {
-  const hours: { label: string; value: string }[] = [];
+  const hours: { label: string; value: string }[] = [
+    { label: '-- 時', value: '' }
+  ];
   if (market === 'TW') {
     for (let h = 9; h <= 14; h++) {
       const hStr = String(h).padStart(2, '0');
@@ -87,9 +89,16 @@ export function getTradingHourOptions(market: 'TW' | 'US', dateStr: string): { l
   return hours;
 }
 
-// 取得指定小時內的分鐘選項 (00 ~ 59)
+// 取得指定小時內的分鐘選項 (00 ~ 59，首項為 NULL 未指定)
 export function getTradingMinuteOptions(market: 'TW' | 'US', dateStr: string, hourStr: string): { label: string; value: string }[] {
-  const minutes: { label: string; value: string }[] = [];
+  const minutes: { label: string; value: string }[] = [
+    { label: '-- 分', value: '' }
+  ];
+
+  if (!hourStr) {
+    return minutes;
+  }
+
   const hNum = parseInt(hourStr, 10);
 
   for (let m = 0; m < 60; m++) {
@@ -111,15 +120,15 @@ export function getTradingMinuteOptions(market: 'TW' | 'US', dateStr: string, ho
     minutes.push({ label: `${mStr} 分`, value: mStr });
   }
 
-  if (minutes.length === 0) {
-    minutes.push({ label: '00 分', value: '00' });
-  }
-
   return minutes;
 }
 
-// 驗證輸入的時間是否符合台股/美股的合法交易時間
+// 驗證輸入的時間是否符合台股/美股的合法交易時間 (支援空值 NULL 略過驗證)
 export function validateTradingTime(market: 'TW' | 'US', dateStr: string, hourStr: string, minuteStr: string): { isValid: boolean; errorMsg: string; isWarning?: boolean } {
+  if (!hourStr || !minuteStr) {
+    return { isValid: true, errorMsg: '' };
+  }
+
   const h = parseInt(hourStr, 10);
   const m = parseInt(minuteStr, 10);
 
@@ -175,7 +184,7 @@ export interface LedgerEntry {
   id: string;
   tradeId: string;
   date: string;
-  type: 'SELL_REVENUE' | 'FEE' | 'TAX' | 'REBATE';
+  type: 'SELL_REVENUE' | 'FEE' | 'TAX' | 'REBATE' | 'DIVIDEND';
   typeName: string;
   code: string;
   name: string;
@@ -206,10 +215,8 @@ export default function DashboardScreen({ route }: { route?: any }) {
   const [tab, setTab] = useState<'holdings' | 'history'>('holdings');
   const [ledgerFullScreenVisible, setLedgerFullScreenVisible] = useState<boolean>(false);
   
-  // 流水帳時間範圍過濾狀態 ('7d', 1m, 3m, 6m, 1y, 5y, 10y, custom)
   const [ledgerTimeRange, setLedgerTimeRange] = useState<'7d' | '1m' | '3m' | '6m' | '1y' | '5y' | '10y' | 'custom'>('7d');
   
-  // 取得台灣當前日期 YYYY-MM-DD
   const getTodayTaiwanStr = () => {
     try {
       const options: Intl.DateTimeFormatOptions = { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' };
@@ -227,7 +234,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
   const [customStartDate, setCustomStartDate] = useState<string>('2000-01-01');
   const [customEndDate, setCustomEndDate] = useState<string>(todayTaiwanStr);
 
-  // 確保每天過台灣時間 00:00 後自動更新結束日期上限
   useEffect(() => {
     const timer = setInterval(() => {
       const currentToday = getTodayTaiwanStr();
@@ -238,13 +244,13 @@ export default function DashboardScreen({ route }: { route?: any }) {
     return () => clearInterval(timer);
   }, [customEndDate, ledgerTimeRange]);
 
-  // Modals
   const [infoModalVisible, setInfoModalVisible] = useState(false);
   const [recordExplainModalVisible, setRecordExplainModalVisible] = useState(false);
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [sellModalVisible, setSellModalVisible] = useState(false);
+  const [dividendModalVisible, setDividendModalVisible] = useState(false);
 
   const [selectedFilterCode, setSelectedFilterCode] = useState<string | null>(null);
   const [selectedHistoryFilterCode, setSelectedHistoryFilterCode] = useState<string | null>(null);
@@ -258,7 +264,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
     }
   }, [route?.params]);
 
-  // 資產與持股資料
   const [cash, setCash] = useState<number>(0);
   const [holdings, setHoldings] = useState<HoldingItem[]>([]);
   const [historyTrades, setHistoryTrades] = useState<RealizedTrade[]>([]);
@@ -268,10 +273,15 @@ export default function DashboardScreen({ route }: { route?: any }) {
   const [lastRefreshedTime, setLastRefreshedTime] = useState<string>('');
   const [rebateSuccessMsg, setRebateSuccessMsg] = useState<string>('');
 
+  // 領股息輸入相關狀態
+  const [dividendPerShareInput, setDividendPerShareInput] = useState('');
+  const [dividendDateInput, setDividendDateInput] = useState(todayTaiwanStr);
+  const [dividendErrorMsg, setDividendErrorMsg] = useState('');
+
   const getStorageKey = (prefix: string) => `@mystock_${prefix}_${user?.id || 'guest'}`;
 
-  const rebuildLedgerEntries = (trades: RealizedTrade[]) => {
-    const entries: LedgerEntry[] = [];
+  const rebuildLedgerEntries = (trades: RealizedTrade[], customDividends?: LedgerEntry[]) => {
+    const entries: LedgerEntry[] = customDividends ? [...customDividends.filter(e => e.type === 'DIVIDEND')] : [];
     
     trades.forEach(t => {
       const isUS = t.currency === 'USD' || t.market === 'US';
@@ -336,7 +346,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
     setLedgerEntries(entries);
   };
 
-  // 根據選擇的時間範圍或自訂日期區間過濾流水帳項目
   const filteredLedgerEntries = useMemo(() => {
     if (ledgerTimeRange === '10y') return ledgerEntries;
 
@@ -373,7 +382,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
     });
   }, [ledgerEntries, ledgerTimeRange, customStartDate, customEndDate]);
 
-  // 依日期（YYYY-MM-DD）分組流水帳
   const groupedLedgerEntries = useMemo(() => {
     const map = new Map<string, LedgerEntry[]>();
     filteredLedgerEntries.forEach((entry) => {
@@ -387,7 +395,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
     const sortedDays = Array.from(map.keys()).sort((a, b) => b.localeCompare(a));
     return sortedDays.map((day) => ({
       day,
-      entries: map.get(day)!,
+      entries: map.get(day)!.sort((a, b) => b.date.localeCompare(a.date)),
     }));
   }, [filteredLedgerEntries]);
 
@@ -398,6 +406,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
         const savedTrades = await AsyncStorage.getItem(getStorageKey('trades'));
         const savedCash = await AsyncStorage.getItem(getStorageKey('cash'));
         const savedBrokerId = await AsyncStorage.getItem(getStorageKey('brokerId'));
+        const savedDividends = await AsyncStorage.getItem(getStorageKey('dividends'));
 
         if (savedHoldings) {
           setHoldings(JSON.parse(savedHoldings));
@@ -407,6 +416,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
 
         const trades: RealizedTrade[] = savedTrades ? JSON.parse(savedTrades) : [];
         let cashNum = savedCash ? (parseFloat(savedCash) || 0) : 0;
+        const parsedDividends: LedgerEntry[] = savedDividends ? JSON.parse(savedDividends) : [];
 
         const dueTrades = trades.filter(t => isTradeRebateDue(t));
         if (dueTrades.length > 0) {
@@ -415,7 +425,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
           const updatedTrades = trades.map(t => isTradeRebateDue(t) ? { ...t, isRebated: true } : t);
           
           setHistoryTrades(updatedTrades);
-          rebuildLedgerEntries(updatedTrades);
+          rebuildLedgerEntries(updatedTrades, parsedDividends);
           setCash(cashNum);
           
           await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
@@ -425,7 +435,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
           setTimeout(() => setRebateSuccessMsg(''), 6000);
         } else {
           setHistoryTrades(trades);
-          rebuildLedgerEntries(trades);
+          rebuildLedgerEntries(trades, parsedDividends);
           setCash(cashNum);
         }
 
@@ -465,7 +475,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
     }
   }, [profile]);
 
-  // 新增 / 編輯 表單狀態
   const [selectedHolding, setSelectedHolding] = useState<HoldingItem | null>(null);
   const [formMarket, setFormMarket] = useState<'TW' | 'US'>('TW');
   const [formCode, setFormCode] = useState('');
@@ -474,20 +483,19 @@ export default function DashboardScreen({ route }: { route?: any }) {
   const [formAvgCost, setFormAvgCost] = useState('');
   const [formCurrentPrice, setFormCurrentPrice] = useState('');
   const [formBuyDate, setFormBuyDate] = useState(new Date().toISOString().split('T')[0]);
-  const [formBuyHour, setFormBuyHour] = useState('09');
-  const [formBuyMinute, setFormBuyMinute] = useState('30');
+  const [formBuyHour, setFormBuyHour] = useState('');
+  const [formBuyMinute, setFormBuyMinute] = useState('');
   const [formIsDCA, setFormIsDCA] = useState<boolean>(false);
   const [isFetchingQuote, setIsFetchingQuote] = useState(false);
   const [quoteStatusMsg, setQuoteStatusMsg] = useState<{ type: 'success' | 'error' | 'loading' | ''; text: string }>({ type: '', text: '' });
   const [formErrorMsg, setFormErrorMsg] = useState('');
   const [formWarningMsg, setFormWarningMsg] = useState('');
 
-  // 賣出表單狀態
   const [sellPriceInput, setSellPriceInput] = useState('');
   const [sellSharesInput, setSellSharesInput] = useState('');
   const [sellDateInput, setSellDateInput] = useState(new Date().toISOString().split('T')[0]);
-  const [sellHour, setSellHour] = useState('09');
-  const [sellMinute, setSellMinute] = useState('30');
+  const [sellHour, setSellHour] = useState('');
+  const [sellMinute, setSellMinute] = useState('');
   const [sellTradeMode, setSellTradeMode] = useState<'normal' | 'dayTrade' | 'dca'>('normal');
   const [sellErrorMsg, setSellErrorMsg] = useState('');
   const [sellWarningMsg, setSellWarningMsg] = useState('');
@@ -495,14 +503,14 @@ export default function DashboardScreen({ route }: { route?: any }) {
   const addHourOptions = useMemo(() => getTradingHourOptions(formMarket, formBuyDate), [formMarket, formBuyDate]);
   useEffect(() => {
     if (!addHourOptions.some(h => h.value === formBuyHour)) {
-      setFormBuyHour(addHourOptions[0]?.value || '09');
+      setFormBuyHour(addHourOptions[0]?.value || '');
     }
   }, [addHourOptions]);
 
   const addMinuteOptions = useMemo(() => getTradingMinuteOptions(formMarket, formBuyDate, formBuyHour), [formMarket, formBuyDate, formBuyHour]);
   useEffect(() => {
     if (!addMinuteOptions.some(m => m.value === formBuyMinute)) {
-      setFormBuyMinute(addMinuteOptions[0]?.value || '00');
+      setFormBuyMinute(addMinuteOptions[0]?.value || '');
     }
   }, [addMinuteOptions]);
 
@@ -510,14 +518,14 @@ export default function DashboardScreen({ route }: { route?: any }) {
   const sellHourOptions = useMemo(() => getTradingHourOptions(sellMarket, sellDateInput), [sellMarket, sellDateInput]);
   useEffect(() => {
     if (!sellHourOptions.some(h => h.value === sellHour)) {
-      setSellHour(sellHourOptions[0]?.value || '09');
+      setSellHour(sellHourOptions[0]?.value || '');
     }
   }, [sellHourOptions]);
 
   const sellMinuteOptions = useMemo(() => getTradingMinuteOptions(sellMarket, sellDateInput, sellHour), [sellMarket, sellDateInput, sellHour]);
   useEffect(() => {
     if (!sellMinuteOptions.some(m => m.value === sellMinute)) {
-      setSellMinute(sellMinuteOptions[0]?.value || '00');
+      setSellMinute(sellMinuteOptions[0]?.value || '');
     }
   }, [sellMinuteOptions]);
 
@@ -626,7 +634,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
     return result;
   }, [holdings, currentBroker, usdRate]);
 
-  // 歷史紀錄彙整群組
   const historySummaries = React.useMemo(() => {
     const map = new Map<string, { code: string; name: string; currency: 'TWD' | 'USD'; sellCount: number; totalShares: number; totalNetProfit: number }>();
 
@@ -683,7 +690,8 @@ export default function DashboardScreen({ route }: { route?: any }) {
 
     setCash(newCash);
     setHistoryTrades(updatedTrades);
-    rebuildLedgerEntries(updatedTrades);
+    const existingDividends = ledgerEntries.filter(e => e.type === 'DIVIDEND');
+    rebuildLedgerEntries(updatedTrades, existingDividends);
 
     await AsyncStorage.setItem(getStorageKey('cash'), newCash.toString());
     await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
@@ -700,13 +708,99 @@ export default function DashboardScreen({ route }: { route?: any }) {
 
     setCash(newCash);
     setHistoryTrades(updatedTrades);
-    rebuildLedgerEntries(updatedTrades);
+    const existingDividends = ledgerEntries.filter(e => e.type === 'DIVIDEND');
+    rebuildLedgerEntries(updatedTrades, existingDividends);
 
     await AsyncStorage.setItem(getStorageKey('cash'), newCash.toString());
     await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
 
     setRebateSuccessMsg(`🟢 已將所有手續費退佣共 NT$${totalPendingRebates.toLocaleString()} 元成功加到您的可用現金與資產中！`);
     setTimeout(() => setRebateSuccessMsg(''), 4000);
+  };
+
+  // 刪除歷史紀錄的防呆與處理函式
+  const handleDeleteHistoryTrade = async (tradeId: string) => {
+    const targetTrade = historyTrades.find(t => t.id === tradeId);
+    if (!targetTrade) return;
+
+    const confirmMsg = `⚠️ 【刪除歷史紀錄防呆警示】\n\n您確定要刪除這筆已實現歷史紀錄嗎？\n標的：${targetTrade.code} ${targetTrade.name}\n售出日期：${targetTrade.sellDate}\n淨利：${targetTrade.netProfit >= 0 ? '+' : ''}${targetTrade.netProfit.toLocaleString()}\n\n注意：刪除後將無法復原！`;
+
+    let isConfirmed = false;
+    if (Platform.OS === 'web' || typeof window !== 'undefined') {
+      isConfirmed = window.confirm(confirmMsg);
+    } else {
+      isConfirmed = true;
+    }
+
+    if (!isConfirmed) return;
+
+    const updatedTrades = historyTrades.filter(t => t.id !== tradeId);
+    setHistoryTrades(updatedTrades);
+    const existingDividends = ledgerEntries.filter(e => e.type === 'DIVIDEND');
+    rebuildLedgerEntries(updatedTrades, existingDividends);
+
+    try {
+      await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
+      setRebateSuccessMsg(`🗑️ 已成功刪除歷史紀錄：${targetTrade.code} ${targetTrade.name}`);
+      setTimeout(() => setRebateSuccessMsg(''), 4000);
+    } catch (e) {
+      console.warn('刪除歷史紀錄寫入儲存失敗', e);
+    }
+  };
+
+  // 領股息觸發與確認處理函式 (自動取買進日作為最小日期限制)
+  const handleOpenDividend = (item: HoldingItem) => {
+    setSelectedHolding(item);
+    setDividendPerShareInput('');
+    setDividendErrorMsg('');
+    const baseBuyDate = (item.buyDate || todayTaiwanStr).split(' ')[0];
+    setDividendDateInput(baseBuyDate >= todayTaiwanStr ? baseBuyDate : todayTaiwanStr);
+    setDividendModalVisible(true);
+  };
+
+  const handleConfirmDividend = async () => {
+    if (!selectedHolding) return;
+    const dps = parseNumber(dividendPerShareInput);
+    if (dps <= 0 || isNaN(dps)) {
+      setDividendErrorMsg('❌ 請輸入大於 0 的每股配息金額！');
+      return;
+    }
+
+    const baseBuyDate = (selectedHolding.buyDate || '2000-01-01').split(' ')[0];
+    if (dividendDateInput < baseBuyDate) {
+      setDividendErrorMsg(`❌ 股息發放日期 (${dividendDateInput}) 不得早於股票買入日期 (${baseBuyDate})！`);
+      return;
+    }
+
+    const totalDividend = Math.round(selectedHolding.shares * dps);
+    const newCash = cash + totalDividend;
+    setCash(newCash);
+
+    const newLedgerEntry: LedgerEntry = {
+      id: `${Date.now()}_div`,
+      tradeId: selectedHolding.id,
+      date: dividendDateInput,
+      type: 'DIVIDEND',
+      typeName: '現金股利收入',
+      code: selectedHolding.code,
+      name: selectedHolding.name,
+      amount: totalDividend,
+      note: `持有 ${selectedHolding.shares.toLocaleString()} 股，每股配息 $${dps}`
+    };
+
+    const updatedDividends = [newLedgerEntry, ...ledgerEntries.filter(e => e.type === 'DIVIDEND')];
+    rebuildLedgerEntries(historyTrades, updatedDividends);
+
+    try {
+      await AsyncStorage.setItem(getStorageKey('cash'), newCash.toString());
+      await AsyncStorage.setItem(getStorageKey('dividends'), JSON.stringify(updatedDividends));
+    } catch (e) {
+      console.warn('儲存現金或股利失敗', e);
+    }
+
+    setRebateSuccessMsg(`💰 已成功將【${selectedHolding.name}】現金股利 NT$${totalDividend.toLocaleString()} 元加入可用現金與總資產！`);
+    setTimeout(() => setRebateSuccessMsg(''), 4000);
+    setDividendModalVisible(false);
   };
 
   const handleTriggerFetchQuote = async (targetCode?: string) => {
@@ -820,7 +914,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
     }
 
     const finalName = formName.trim() || formCode.trim();
-    const finalTimeStr = `${formBuyHour}:${formBuyMinute}`;
+    const finalTimeStr = (formBuyHour && formBuyMinute) ? `${formBuyHour}:${formBuyMinute}` : '';
 
     const newHolding: HoldingItem = {
       id: Date.now().toString(),
@@ -829,7 +923,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
       shares: sharesNum,
       avgCost: costNum,
       currentPrice: currentPriceNum,
-      buyDate: `${formBuyDate} ${finalTimeStr}`,
+      buyDate: finalTimeStr ? `${formBuyDate} ${finalTimeStr}` : formBuyDate,
       market: formMarket,
       currency: formMarket === 'US' ? 'USD' : 'TWD',
       isDCA: formIsDCA,
@@ -858,13 +952,13 @@ export default function DashboardScreen({ route }: { route?: any }) {
     if (item.buyDate && item.buyDate.includes(' ')) {
       const parts = item.buyDate.split(' ');
       setFormBuyDate(parts[0]);
-      const timeParts = (parts[1] || '09:30').split(':');
-      setFormBuyHour(timeParts[0] || '09');
-      setFormBuyMinute(timeParts[1] || '30');
+      const timeParts = (parts[1] || '').split(':');
+      setFormBuyHour(timeParts[0] || '');
+      setFormBuyMinute(timeParts[1] || '');
     } else {
       setFormBuyDate(item.buyDate || new Date().toISOString().split('T')[0]);
-      setFormBuyHour('09');
-      setFormBuyMinute('30');
+      setFormBuyHour('');
+      setFormBuyMinute('');
     }
 
     setQuoteStatusMsg({ type: '', text: '' });
@@ -880,7 +974,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
       return;
     }
 
-    const finalTimeStr = `${formBuyHour}:${formBuyMinute}`;
+    const finalTimeStr = (formBuyHour && formBuyMinute) ? `${formBuyHour}:${formBuyMinute}` : '';
 
     const sharesNum = parseInt(parseNumber(formShares).toString()) || 0;
     const costNum = parseNumber(formAvgCost) || 0;
@@ -892,7 +986,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
       shares: sharesNum,
       avgCost: costNum,
       currentPrice: priceNum,
-      buyDate: `${formBuyDate} ${finalTimeStr}`,
+      buyDate: finalTimeStr ? `${formBuyDate} ${finalTimeStr}` : formBuyDate,
       market: formMarket,
       currency: formMarket === 'US' ? 'USD' : 'TWD',
       isDCA: formIsDCA,
@@ -919,8 +1013,8 @@ export default function DashboardScreen({ route }: { route?: any }) {
     setSellSharesInput(formatWithCommas(item.shares.toString()));
     const dateToday = getTodayTaiwanStr();
     setSellDateInput(dateToday);
-    setSellHour('09');
-    setSellMinute('30');
+    setSellHour('');
+    setSellMinute('');
     setSellTradeMode(item.isDCA ? 'dca' : 'normal');
     setSellErrorMsg('');
     setSellModalVisible(true);
@@ -954,7 +1048,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
     }
 
     const isUS = selectedHolding.currency === 'USD' || selectedHolding.market === 'US';
-    const finalSellTimeStr = `${sellHour}:${sellMinute}`;
+    const finalSellTimeStr = (sellHour && sellMinute) ? `${sellHour}:${sellMinute}` : '';
     const bPrice = selectedHolding.avgCost;
     const grossRevenue = sPrice * sShares;
     const isETF = isETFCode(selectedHolding.code);
@@ -1019,7 +1113,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
       code: selectedHolding.code,
       name: selectedHolding.name,
       buyDate: selectedHolding.buyDate,
-      sellDate: `${sellDateInput} ${finalSellTimeStr}`,
+      sellDate: finalSellTimeStr ? `${sellDateInput} ${finalSellTimeStr}` : sellDateInput,
       shares: sShares,
       buyPrice: bPrice,
       sellPrice: sPrice,
@@ -1044,7 +1138,8 @@ export default function DashboardScreen({ route }: { route?: any }) {
 
     const updatedTrades = [newTrade, ...historyTrades];
     setHistoryTrades(updatedTrades);
-    rebuildLedgerEntries(updatedTrades);
+    const existingDividends = ledgerEntries.filter(e => e.type === 'DIVIDEND');
+    rebuildLedgerEntries(updatedTrades, existingDividends);
     
     let updatedHoldings: HoldingItem[] = [];
     if (sShares === selectedHolding.shares) {
@@ -1108,8 +1203,8 @@ export default function DashboardScreen({ route }: { route?: any }) {
     setFormCurrentPrice('');
     const dateToday = getTodayTaiwanStr();
     setFormBuyDate(dateToday);
-    setFormBuyHour('09');
-    setFormBuyMinute('30');
+    setFormBuyHour('');
+    setFormBuyMinute('');
     setFormIsDCA(false);
     setQuoteStatusMsg({ type: '', text: '' });
     setFormErrorMsg('');
@@ -1216,7 +1311,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       ) : null}
 
-      {/* 1. 【獲利目標里程碑】卡片 */}
       <View style={styles.highlightCard}>
         <View style={styles.headerRow}>
           <Text style={styles.highlightCardTitle}>🏆 【獲利目標里程碑】</Text>
@@ -1249,7 +1343,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </View>
 
-      {/* 2. 【資產總覽】卡片 */}
       <View style={styles.card}>
         <View style={styles.headerRow}>
           <Text style={styles.cardTitle}>【資產總覽】 (折算新台幣)</Text>
@@ -1310,7 +1403,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </View>
 
-      {/* 3. 待退佣專區 */}
       {totalPendingRebates > 0 && (
         <View style={styles.pendingRebateBanner}>
           <View style={{ flex: 1 }}>
@@ -1327,7 +1419,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       )}
 
-      {/* 4. 功能選單與按鈕 */}
       <View style={styles.actionRow}>
         <View style={styles.tabContainer}>
           <TouchableOpacity 
@@ -1375,7 +1466,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       ) : null}
 
-      {/* 5. 持股部位快速統計按鈕與個股/總體總覽列 */}
       {tab === 'holdings' && stockSummaries.length > 0 && (
         <View style={styles.stockSummaryContainer}>
           <Text style={styles.stockSummaryHeader}>📊 我的持股快速點選與匯總（點擊標籤可過濾明細）：</Text>
@@ -1441,7 +1531,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       )}
 
-      {/* 歷史紀錄快速點選與總結晶片列 */}
       {tab === 'history' && historySummaries.length > 0 && (
         <View style={styles.stockSummaryContainer}>
           <Text style={styles.stockSummaryHeader}>📊 歷史已實現紀錄快速點選與匯總（點擊標籤可過濾明細）：</Text>
@@ -1503,7 +1592,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       )}
 
-      {/* 6. 列表區：現有持股 / 歷史紀錄 */}
       {tab === 'holdings' ? (
         filteredHoldings.length === 0 ? (
           <View style={styles.emptyBox}>
@@ -1563,6 +1651,11 @@ export default function DashboardScreen({ route }: { route?: any }) {
                 </View>
 
                 <View style={styles.itemActionGroup}>
+                  {/* 👇 新增領股息按鈕 */}
+                  <TouchableOpacity style={styles.editBtn} onPress={() => handleOpenDividend(item)}>
+                    <Text style={styles.editBtnText}>領股息</Text>
+                  </TouchableOpacity>
+
                   <TouchableOpacity style={styles.sellBtn} onPress={() => handleOpenSell(item)}>
                     <Text style={styles.sellBtnText}>賣出結算</Text>
                   </TouchableOpacity>
@@ -1635,11 +1728,21 @@ export default function DashboardScreen({ route }: { route?: any }) {
                   )}
                 </View>
 
-                <View style={{ alignItems: 'flex-end', minWidth: 120 }}>
+                <View style={{ alignItems: 'flex-end', minWidth: 120, marginRight: 12 }}>
                   <Text style={[styles.stockPrice, item.netProfit >= 0 ? styles.profit : styles.loss]}>
                     {item.netProfit >= 0 ? `獲利 +${sym}${Math.abs(item.netProfit).toLocaleString()}` : `虧損 -${sym}${Math.abs(item.netProfit).toLocaleString()}`}
                   </Text>
                   <Text style={styles.detailText}>買進 {sym}{item.buyPrice.toLocaleString()} ➔ 賣出 {sym}{item.sellPrice.toLocaleString()}</Text>
+                </View>
+
+                {/* 歷史紀錄刪除按鈕 */}
+                <View style={styles.itemActionGroup}>
+                  <TouchableOpacity 
+                    style={styles.deleteHistoryBtn} 
+                    onPress={() => handleDeleteHistoryTrade(item.id)}
+                  >
+                    <Text style={styles.deleteHistoryBtnText}>🗑️ 刪除紀錄</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
             );
@@ -1647,13 +1750,13 @@ export default function DashboardScreen({ route }: { route?: any }) {
         )
       )}
 
-      {/* 拆筆流水帳【最大網頁階層】FullScreen Modal */}
+      {/* 拆筆流水帳完整明細 Modal */}
       <Modal animationType="slide" transparent={false} visible={ledgerFullScreenVisible} onRequestClose={() => setLedgerFullScreenVisible(false)}>
         <View style={styles.fullScreenModalContainer}>
           <View style={styles.fullScreenHeader}>
             <View>
               <Text style={styles.fullScreenTitle}>📊 拆筆流水帳完整明細紀錄 (按天數排)</Text>
-              <Text style={styles.fullScreenSubtitle}>完整檢視所有買賣交割、手續費、證交稅與退佣之拆筆金流明細</Text>
+              <Text style={styles.fullScreenSubtitle}>完整檢視所有買賣交割、手續費、證交稅、退佣與現金股利之拆筆金流明細</Text>
             </View>
             <View style={{ flexDirection: 'row', gap: 10 }}>
               <TouchableOpacity style={styles.downloadCsvBtn} onPress={handleDownloadCSV}>
@@ -1665,7 +1768,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
             </View>
           </View>
 
-          {/* 時間範圍選擇按鈕列與自訂日期區間 */}
           <View style={styles.timeRangeFilterBar}>
             <Text style={styles.timeRangeFilterLabel}>📅 時間範圍區間：</Text>
             <View style={styles.timeRangeBtnGroup}>
@@ -1695,7 +1797,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
               })}
             </View>
 
-            {/* 如果選擇自訂區間，展開日曆輸入框 (最早 2000-01-01，最晚當天台灣日期) */}
             {ledgerTimeRange === 'custom' && (
               <View style={styles.customDateContainer}>
                 <View style={styles.customDateInputGroup}>
@@ -1789,7 +1890,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </Modal>
 
-      {/* 說明 Modal */}
       <Modal animationType="fade" transparent={true} visible={recordExplainModalVisible} onRequestClose={() => setRecordExplainModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalScroll}>
@@ -1821,7 +1921,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </Modal>
 
-      {/* 新增持股 Modal */}
       <Modal animationType="fade" transparent={true} visible={addModalVisible} onRequestClose={() => setAddModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalScroll}>
@@ -2039,7 +2138,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </Modal>
 
-      {/* 編輯持股 Modal */}
       <Modal animationType="fade" transparent={true} visible={editModalVisible} onRequestClose={() => setEditModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalScroll}>
@@ -2194,7 +2292,89 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </Modal>
 
-      {/* 賣出部位與損益結算 Modal */}
+      {/* 領股息 Modal 視窗（已優化清晰度與加入發放日期選擇） */}
+      <Modal animationType="fade" transparent={true} visible={dividendModalVisible} onRequestClose={() => setDividendModalVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <ScrollView contentContainerStyle={styles.modalScroll}>
+            <View style={styles.modalContentLarge}>
+              <Text style={styles.modalTitle}>// 記錄現金股利領取 - {selectedHolding?.name} ({selectedHolding?.code})</Text>
+              
+              <View style={styles.dividendInfoRow}>
+                <Text style={styles.dividendInfoLabel}>目前持有股數：</Text>
+                <Text style={styles.dividendInfoVal}>{selectedHolding?.shares.toLocaleString()} 股</Text>
+              </View>
+              
+              <View style={styles.dividendInfoRow}>
+                <Text style={styles.dividendInfoLabel}>股票買入日期：</Text>
+                <Text style={styles.dividendInfoVal}>{(selectedHolding?.buyDate || '').split(' ')[0]}</Text>
+              </View>
+
+              <Text style={styles.label}>(1) 選擇股息發放日期 (必須大於或等於買入日期)：</Text>
+              {Platform.OS === 'web' ? (
+                <input 
+                  type="date"
+                  min={(selectedHolding?.buyDate || '2000-01-01').split(' ')[0]}
+                  max={todayTaiwanStr}
+                  value={dividendDateInput}
+                  onChange={(e) => {
+                    setDividendDateInput(e.target.value);
+                    setDividendErrorMsg('');
+                  }}
+                  style={webInputStyle}
+                />
+              ) : (
+                <TextInput 
+                  style={styles.inputLarge} 
+                  value={dividendDateInput} 
+                  onChangeText={(val) => {
+                    setDividendDateInput(val);
+                    setDividendErrorMsg('');
+                  }} 
+                />
+              )}
+
+              <Text style={styles.label}>(2) 每股配發股息金額 (現金股利)：</Text>
+              <TextInput 
+                style={styles.inputLarge} 
+                value={dividendPerShareInput} 
+                onChangeText={(val) => {
+                  setDividendPerShareInput(val);
+                  setDividendErrorMsg('');
+                }} 
+                keyboardType="numeric" 
+                placeholder="例如: 1.5 或 3.2" 
+                placeholderTextColor="#737373" 
+              />
+
+              {dividendPerShareInput && parseNumber(dividendPerShareInput) > 0 ? (
+                <View style={styles.dividendPreviewCard}>
+                  <Text style={styles.dividendPreviewTitle}>📊 股利入帳總額試算</Text>
+                  <Text style={styles.dividendPreviewResult}>
+                    +NT${Math.round((selectedHolding?.shares || 0) * parseNumber(dividendPerShareInput)).toLocaleString()} 元
+                  </Text>
+                  <Text style={styles.dividendPreviewSub}>
+                    發放日期：{dividendDateInput} (將自動計入可用現金與總資產)
+                  </Text>
+                </View>
+              ) : null}
+
+              {dividendErrorMsg ? (
+                <View style={styles.errorBoxAlert}>
+                  <Text style={styles.errorText}>{dividendErrorMsg}</Text>
+                </View>
+              ) : null}
+
+              <TouchableOpacity style={styles.confirmBtn} onPress={handleConfirmDividend}>
+                <Text style={styles.confirmBtnText}>確認入帳現金股利</Text>
+              </TouchableOpacity>
+              <Pressable style={styles.closeBtn} onPress={() => setDividendModalVisible(false)}>
+                <Text style={styles.closeBtnText}>[取消]</Text>
+              </Pressable>
+            </View>
+          </ScrollView>
+        </View>
+      </Modal>
+
       <Modal animationType="fade" transparent={true} visible={sellModalVisible} onRequestClose={() => setSellModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalScroll}>
@@ -2446,7 +2626,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </Modal>
 
-      {/* 規費說明 Modal */}
       <Modal animationType="fade" transparent={true} visible={infoModalVisible} onRequestClose={() => setInfoModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalScroll}>
@@ -2484,7 +2663,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
         </View>
       </Modal>
 
-      {/* 設定 Modal */}
       <Modal animationType="fade" transparent={true} visible={settingsModalVisible} onRequestClose={() => setSettingsModalVisible(false)}>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalScroll}>
@@ -2577,7 +2755,6 @@ export default function DashboardScreen({ route }: { route?: any }) {
   );
 }
 
-// 原生深色 Date Picker & Time Select 樣式
 const webInputStyle: React.CSSProperties = {
   width: '100%',
   backgroundColor: '#0a0a0a',
@@ -2754,6 +2931,9 @@ const styles = StyleSheet.create({
   editBtn: { backgroundColor: '#262626', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4 },
   editBtnText: { color: '#a3a3a3', fontSize: 11, fontFamily: 'monospace' },
 
+  deleteHistoryBtn: { backgroundColor: '#450a0a', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4, borderWidth: 1, borderColor: '#ef4444' },
+  deleteHistoryBtnText: { color: '#fca5a5', fontSize: 11, fontFamily: 'monospace', fontWeight: 'bold' },
+
   tableContainer: { backgroundColor: '#121212', borderRadius: 8, borderWidth: 1, borderColor: '#262626', overflow: 'hidden' },
   tableHeaderRow: { flexDirection: 'row', backgroundColor: '#1c1c1c', paddingVertical: 12, paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: '#333333' },
   tableHeaderCell: { color: '#a3a3a3', fontSize: 12, fontWeight: 'bold', fontFamily: 'monospace' },
@@ -2766,6 +2946,14 @@ const styles = StyleSheet.create({
   modalContentLarge: { backgroundColor: '#121212', borderRadius: 8, padding: 24, width: '100%', maxWidth: 680, borderWidth: 1, borderColor: '#404040', marginVertical: 20 },
   modalTitle: { fontSize: 15, fontWeight: 'bold', color: '#ffffff', marginBottom: 18, fontFamily: 'monospace' },
   
+  dividendInfoRow: { flexDirection: 'row', marginBottom: 6 },
+  dividendInfoLabel: { color: '#a3a3a3', fontSize: 12, fontFamily: 'monospace' },
+  dividendInfoVal: { color: '#ffffff', fontSize: 12, fontWeight: 'bold', fontFamily: 'monospace' },
+  dividendPreviewCard: { backgroundColor: '#171717', borderRadius: 6, padding: 12, marginVertical: 10, borderWidth: 1, borderColor: '#3b82f6' },
+  dividendPreviewTitle: { color: '#60a5fa', fontSize: 12, fontWeight: 'bold', fontFamily: 'monospace', marginBottom: 4 },
+  dividendPreviewResult: { color: '#ef4444', fontSize: 16, fontWeight: 'bold', fontFamily: 'monospace' },
+  dividendPreviewSub: { color: '#a3a3a3', fontSize: 11, fontFamily: 'monospace', marginTop: 4 },
+
   marketSelectorRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
   marketSelectBtn: { flex: 1, paddingVertical: 8, borderRadius: 4, alignItems: 'center', backgroundColor: '#171717', borderWidth: 1, borderColor: '#262626' },
   marketSelectBtnActive: { backgroundColor: '#262626', borderColor: '#525252' },
