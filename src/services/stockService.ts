@@ -117,9 +117,7 @@ export async function fetchStockQuote(rawCode: string): Promise<StockQuote | nul
     if (infoRes?.data && infoRes.data.length > 0) {
       const rawName = infoRes.data[0].stock_name;
       if (rawName) {
-        // 美股若有名稱，可簡化 Common Stock 等字眼
         resolvedName = rawName.replace(/ Common Stock/i, '').replace(/ Class A/i, '').trim();
-        // 若在知名清單有中文名，優先保留中文名
         if (popular) resolvedName = popular.name;
       }
     }
@@ -155,10 +153,11 @@ export async function fetchStockQuote(rawCode: string): Promise<StockQuote | nul
     console.warn('FinMind 抓取失敗，嘗試備援管道:', err);
   }
 
-  // 2. 備援：Yahoo Finance (App 原生環境無 CORS 限制，或備用端點)
+  // 2. 備援：Yahoo Finance (透過 CORS Proxy 繞過跨網域限制)[cite: 8]
   try {
     const symbol = market === 'TW' ? `${cleanCode}.TW` : cleanCode;
-    const yahooUrl = `https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;fields=avgPrice,change,changePercent,marketStatus,name,price,symbol;symbols=${symbol}`;
+    const rawYahooUrl = `https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;fields=avgPrice,change,changePercent,marketStatus,name,price,symbol;symbols=${symbol}`;
+    const yahooUrl = `https://corsproxy.io/?${encodeURIComponent(rawYahooUrl)}`;
 
     const response = await fetch(yahooUrl);
     if (response.ok) {
@@ -185,7 +184,6 @@ export async function fetchStockQuote(rawCode: string): Promise<StockQuote | nul
     console.warn('Yahoo 備援抓取失敗:', err);
   }
 
-  // 若均未連線成功但有在常用標的名單中，返回標的名稱並提示
   return {
     code: cleanCode,
     name: defaultName,
@@ -220,11 +218,13 @@ export async function fetchMultipleStockQuotes(codes: string[]): Promise<Record<
 }
 
 /**
- * 取得最新美元兌台幣匯率 (預設 32.4)
+ * 取得最新美元兌台幣匯率 (透過 CORS Proxy 繞過跨網域限制)[cite: 8]
  */
 export async function getUsdToTwdRate(): Promise<number> {
   try {
-    const url = 'https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;fields=avgPrice,price,symbol;symbols=USDTWD=X';
+    const rawUrl = 'https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;fields=avgPrice,price,symbol;symbols=USDTWD=X';
+    const url = `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`;
+    
     const res = await fetch(url);
     if (res.ok) {
       const data = await res.json();
