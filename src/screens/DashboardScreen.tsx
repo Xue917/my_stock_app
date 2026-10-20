@@ -24,6 +24,15 @@ import {
   POPULAR_STOCKS 
 } from '../services/stockService';
 import {
+  fetchHoldingsFromSupabase,
+  saveHoldingToSupabase,
+  saveMultipleHoldingsToSupabase,
+  deleteHoldingFromSupabase,
+  fetchTradesFromSupabase,
+  saveTradeToSupabase,
+  deleteTradeFromSupabase,
+} from '../services/stockStorageService';
+import {
   isETFCode,
   calculateBuyFee,
   calculateSellFeeAndTax,
@@ -31,25 +40,13 @@ import {
   isTradeRebateDue,
 } from '../utils/feeCalculator';
 
-// 🛡️ CORS 安全代理包裝函式（解決 Vercel 部署時 Yahoo 財經 CORS 阻擋問題）
+// 🛡️ 安全取得即時美元兌台幣匯率 (由多來源無 CORS 限制端點提供)
 async function safeGetUsdToTwdRate(): Promise<number> {
   try {
     const rate = await originalGetUsdToTwdRate();
     if (rate && rate > 0) return rate;
   } catch (e) {
-    console.warn('originalGetUsdToTwdRate failed, trying CORS proxy fallback...', e);
-  }
-
-  try {
-    const targetUrl = encodeURIComponent('https://tw.stock.yahoo.com/_td-stock/api/resource/StockServices.stockList;fields=avgPrice,price,symbol;symbols=USDTWD=X');
-    const res = await fetch(`https://corsproxy.io/?${targetUrl}`);
-    const data = await res.json();
-    const price = data?.list?.[0]?.price;
-    if (price && typeof price === 'number' && price > 0) {
-      return price;
-    }
-  } catch (err) {
-    console.warn('CORS proxy fallback rate failed:', err);
+    console.warn('originalGetUsdToTwdRate failed, fallback to 32.4:', e);
   }
   return 32.4; // 預設安全匯率
 }
@@ -451,15 +448,55 @@ export default function DashboardScreen({ route }: { route?: any }) {
         const savedBrokerId = await AsyncStorage.getItem(getStorageKey('brokerId'));
         const savedDividends = await AsyncStorage.getItem(getStorageKey('dividends'));
 
-        if (savedHoldings) {
-          setHoldings(JSON.parse(savedHoldings));
-        } else {
-          setHoldings([]);
-        }
-
-        const trades: RealizedTrade[] = savedTrades ? JSON.parse(savedTrades) : [];
+        let currentHoldings: HoldingItem[] = savedHoldings ? JSON.parse(savedHoldings) : [];
+        let trades: RealizedTrade[] = savedTrades ? JSON.parse(savedTrades) : [];
         let cashNum = savedCash ? (parseFloat(savedCash) || 0) : 0;
         const parsedDividends: LedgerEntry[] = savedDividends ? JSON.parse(savedDividends) : [];
+
+        // 立即顯示本地快取，確保介面流暢無延遲
+        setHoldings(currentHoldings);
+        setHistoryTrades(trades);
+        rebuildLedgerEntries(trades, parsedDividends);
+        setCash(cashNum);
+
+        if (savedBrokerId) {
+          setSelectedBrokerId(savedBrokerId);
+        } else if (profile?.defaultBrokerId) {
+          setSelectedBrokerId(profile.defaultBrokerId);
+        }
+
+        // 🌐 若已登入使用者，向 Supabase 進行雙向同步載入
+        if (user?.id) {
+          try {
+            const [dbHoldings, dbTrades] = await Promise.all([
+              fetchHoldingsFromSupabase(user.id),
+              fetchTradesFromSupabase(user.id),
+            ]);
+
+            // 持股同步：雲端有資料則以雲端為主並更新快取；若雲端無資料但本地有，自動上傳至雲端
+            if (dbHoldings && dbHoldings.length > 0) {
+              currentHoldings = dbHoldings;
+              setHoldings(dbHoldings);
+              await AsyncStorage.setItem(getStorageKey('holdings'), JSON.stringify(dbHoldings));
+            } else if (currentHoldings.length > 0) {
+              await saveMultipleHoldingsToSupabase(user.id, currentHoldings);
+            }
+
+            // 交易歷史同步：雲端有資料則以雲端為主；若雲端無但本地有，自動同步上傳
+            if (dbTrades && dbTrades.length > 0) {
+              trades = dbTrades;
+              setHistoryTrades(trades);
+              rebuildLedgerEntries(trades, parsedDividends);
+              await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(trades));
+            } else if (trades.length > 0) {
+              for (const t of trades) {
+                await saveTradeToSupabase(user.id, t);
+              }
+            }
+          } catch (syncErr) {
+            console.warn('與 Supabase 雲端同步失敗，維持使用本地快取:', syncErr);
+          }
+        }
 
         const dueTrades = trades.filter(t => isTradeRebateDue(t));
         if (dueTrades.length > 0) {
@@ -474,18 +511,14 @@ export default function DashboardScreen({ route }: { route?: any }) {
           await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
           await AsyncStorage.setItem(getStorageKey('cash'), cashNum.toString());
 
+          if (user?.id) {
+            for (const dt of updatedTrades.filter(t => isTradeRebateDue(t))) {
+              saveTradeToSupabase(user.id, dt).catch(() => {});
+            }
+          }
+
           setRebateSuccessMsg(`🟢 系統依賣出時間排程, 已自動將 ${dueTrades.length} 筆到期手續費折讓款共 NT$${autoRefundSum.toLocaleString()} 元退回並加到您的資產中！`);
           setTimeout(() => setRebateSuccessMsg(''), 6000);
-        } else {
-          setHistoryTrades(trades);
-          rebuildLedgerEntries(trades, parsedDividends);
-          setCash(cashNum);
-        }
-
-        if (savedBrokerId) {
-          setSelectedBrokerId(savedBrokerId);
-        } else if (profile?.defaultBrokerId) {
-          setSelectedBrokerId(profile.defaultBrokerId);
         }
       } catch (err) {
         console.warn('載入本地快取資料失敗:', err);
@@ -738,6 +771,13 @@ export default function DashboardScreen({ route }: { route?: any }) {
 
     await AsyncStorage.setItem(getStorageKey('cash'), newCash.toString());
     await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
+
+    if (user?.id) {
+      const updatedTrade = updatedTrades.find(t => t.id === tradeId);
+      if (updatedTrade) {
+        saveTradeToSupabase(user.id, updatedTrade).catch(e => console.warn('Supabase 更新折讓失敗:', e));
+      }
+    }
     
     setRebateSuccessMsg(`🟢 已將【${trade.name}】的手續費折讓款 NT$${refund.toLocaleString()} 元加到您的可用現金與資產！`);
     setTimeout(() => setRebateSuccessMsg(''), 4000);
@@ -756,6 +796,12 @@ export default function DashboardScreen({ route }: { route?: any }) {
 
     await AsyncStorage.setItem(getStorageKey('cash'), newCash.toString());
     await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
+
+    if (user?.id) {
+      for (const t of updatedTrades.filter(tr => tr.rebateAmount && tr.isRebated)) {
+        saveTradeToSupabase(user.id, t).catch(() => {});
+      }
+    }
 
     setRebateSuccessMsg(`🟢 已將所有手續費退佣共 NT$${totalPendingRebates.toLocaleString()} 元成功加到您的可用現金與資產中！`);
     setTimeout(() => setRebateSuccessMsg(''), 4000);
@@ -784,6 +830,9 @@ export default function DashboardScreen({ route }: { route?: any }) {
 
     try {
       await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
+      if (user?.id) {
+        deleteTradeFromSupabase(tradeId).catch(e => console.warn('Supabase 刪除歷史紀錄失敗:', e));
+      }
       setRebateSuccessMsg(`🗑️ 已成功刪除歷史紀錄：${targetTrade.code} ${targetTrade.name}`);
       setTimeout(() => setRebateSuccessMsg(''), 4000);
     } catch (e) {
@@ -920,6 +969,10 @@ export default function DashboardScreen({ route }: { route?: any }) {
       setHoldings(updatedHoldings);
       await AsyncStorage.setItem(getStorageKey('holdings'), JSON.stringify(updatedHoldings));
 
+      if (user?.id && updatedHoldings.length > 0) {
+        saveMultipleHoldingsToSupabase(user.id, updatedHoldings).catch(e => console.warn('Supabase 批量更新持股失敗:', e));
+      }
+
       const rate = await safeGetUsdToTwdRate();
       setUsdRate(rate);
       setLastRefreshedTime(nowStr);
@@ -968,7 +1021,7 @@ export default function DashboardScreen({ route }: { route?: any }) {
       currentPrice: currentPriceNum,
       buyDate: finalTimeStr ? `${formBuyDate} ${finalTimeStr}` : formBuyDate,
       market: formMarket,
-      currency: formMarket === 'US' ? 'USD' : 'TWD',
+      currency: (formMarket === 'US' ? 'USD' : 'TWD') as 'USD' | 'TWD',
       isDCA: formIsDCA,
       lastUpdated: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
     };
@@ -976,6 +1029,10 @@ export default function DashboardScreen({ route }: { route?: any }) {
     const updatedHoldings = [...holdings, newHolding];
     setHoldings(updatedHoldings);
     await AsyncStorage.setItem(getStorageKey('holdings'), JSON.stringify(updatedHoldings));
+
+    if (user?.id) {
+      saveHoldingToSupabase(user.id, newHolding).catch(e => console.warn('Supabase 持股儲存失敗:', e));
+    }
 
     resetForm();
     setAddModalVisible(false);
@@ -1031,13 +1088,18 @@ export default function DashboardScreen({ route }: { route?: any }) {
       currentPrice: priceNum,
       buyDate: finalTimeStr ? `${formBuyDate} ${finalTimeStr}` : formBuyDate,
       market: formMarket,
-      currency: formMarket === 'US' ? 'USD' : 'TWD',
+      currency: (formMarket === 'US' ? 'USD' : 'TWD') as 'USD' | 'TWD',
       isDCA: formIsDCA,
       lastUpdated: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
     } : h);
 
     setHoldings(updatedHoldings);
     await AsyncStorage.setItem(getStorageKey('holdings'), JSON.stringify(updatedHoldings));
+
+    const editedHolding = updatedHoldings.find(h => h.id === selectedHolding.id);
+    if (user?.id && editedHolding) {
+      saveHoldingToSupabase(user.id, editedHolding).catch(e => console.warn('Supabase 持股更新失敗:', e));
+    }
 
     resetForm();
     setEditModalVisible(false);
@@ -1047,6 +1109,11 @@ export default function DashboardScreen({ route }: { route?: any }) {
     const updatedHoldings = holdings.filter(h => h.id !== id);
     setHoldings(updatedHoldings);
     await AsyncStorage.setItem(getStorageKey('holdings'), JSON.stringify(updatedHoldings));
+
+    if (user?.id) {
+      deleteHoldingFromSupabase(id).catch(e => console.warn('Supabase 持股刪除失敗:', e));
+    }
+
     setEditModalVisible(false);
   };
 
@@ -1187,11 +1254,18 @@ export default function DashboardScreen({ route }: { route?: any }) {
     let updatedHoldings: HoldingItem[] = [];
     if (sShares === selectedHolding.shares) {
       updatedHoldings = holdings.filter(h => h.id !== selectedHolding.id);
+      if (user?.id) {
+        deleteHoldingFromSupabase(selectedHolding.id).catch(e => console.warn('Supabase 刪除持股失敗:', e));
+      }
     } else {
       updatedHoldings = holdings.map(h => h.id === selectedHolding.id ? {
         ...h,
         shares: h.shares - sShares
       } : h);
+      const remainingHolding = updatedHoldings.find(h => h.id === selectedHolding.id);
+      if (user?.id && remainingHolding) {
+        saveHoldingToSupabase(user.id, remainingHolding).catch(e => console.warn('Supabase 更新持股失敗:', e));
+      }
     }
     setHoldings(updatedHoldings);
 
@@ -1202,6 +1276,9 @@ export default function DashboardScreen({ route }: { route?: any }) {
       await AsyncStorage.setItem(getStorageKey('trades'), JSON.stringify(updatedTrades));
       await AsyncStorage.setItem(getStorageKey('holdings'), JSON.stringify(updatedHoldings));
       await AsyncStorage.setItem(getStorageKey('cash'), updatedCash.toString());
+      if (user?.id) {
+        saveTradeToSupabase(user.id, newTrade).catch(e => console.warn('Supabase 儲存歷史紀錄失敗:', e));
+      }
     } catch (e) {
       console.warn('寫入 AsyncStorage 失敗:', e);
     }

@@ -6,6 +6,8 @@ import { HoldingItem, RealizedTrade } from '../types';
  * 從 Supabase 載入使用者的所有持股資料
  */
 export async function fetchHoldingsFromSupabase(userId: string): Promise<HoldingItem[]> {
+  if (!userId || userId === 'guest') return [];
+
   const { data, error } = await supabase
     .from('holdings')
     .select('*')
@@ -18,7 +20,7 @@ export async function fetchHoldingsFromSupabase(userId: string): Promise<Holding
 
   // 將資料庫蛇形命名 (snake_case) 轉換為前端駝峰命名 (camelCase)
   return (data || []).map((item: any) => ({
-    id: item.id,
+    id: String(item.id),
     code: item.code,
     name: item.name,
     shares: Number(item.shares),
@@ -27,8 +29,8 @@ export async function fetchHoldingsFromSupabase(userId: string): Promise<Holding
     buyDate: item.buy_date,
     market: item.market,
     currency: item.currency,
-    isDCA: item.is_dca,
-    lastUpdated: item.last_updated,
+    isDCA: Boolean(item.is_dca),
+    lastUpdated: item.last_updated || '',
   }));
 }
 
@@ -36,10 +38,12 @@ export async function fetchHoldingsFromSupabase(userId: string): Promise<Holding
  * 儲存或更新單筆持股至 Supabase
  */
 export async function saveHoldingToSupabase(userId: string, item: HoldingItem) {
+  if (!userId || userId === 'guest') return;
+
   const { error } = await supabase
     .from('holdings')
     .upsert({
-      id: item.id,
+      id: String(item.id),
       user_id: userId,
       code: item.code,
       name: item.name,
@@ -59,13 +63,41 @@ export async function saveHoldingToSupabase(userId: string, item: HoldingItem) {
 }
 
 /**
+ * 批量儲存或更新持股至 Supabase
+ */
+export async function saveMultipleHoldingsToSupabase(userId: string, items: HoldingItem[]) {
+  if (!userId || userId === 'guest' || items.length === 0) return;
+
+  const rows = items.map((item) => ({
+    id: String(item.id),
+    user_id: userId,
+    code: item.code,
+    name: item.name,
+    shares: item.shares,
+    avg_cost: item.avgCost,
+    current_price: item.currentPrice,
+    buy_date: item.buyDate,
+    market: item.market,
+    currency: item.currency,
+    is_dca: item.isDCA || false,
+    last_updated: item.lastUpdated || '',
+  }));
+
+  const { error } = await supabase.from('holdings').upsert(rows);
+  if (error) {
+    console.warn('批量儲存持股至 Supabase 失敗:', error.message);
+  }
+}
+
+/**
  * 從 Supabase 刪除持股
  */
 export async function deleteHoldingFromSupabase(id: string) {
+  if (!id) return;
   const { error } = await supabase
     .from('holdings')
     .delete()
-    .eq('id', id);
+    .eq('id', String(id));
 
   if (error) {
     console.warn('刪除 Supabase 持股失敗:', error.message);
@@ -76,6 +108,8 @@ export async function deleteHoldingFromSupabase(id: string) {
  * 從 Supabase 載入歷史已實現交易紀錄
  */
 export async function fetchTradesFromSupabase(userId: string): Promise<RealizedTrade[]> {
+  if (!userId || userId === 'guest') return [];
+
   const { data, error } = await supabase
     .from('trades')
     .select('*')
@@ -88,7 +122,7 @@ export async function fetchTradesFromSupabase(userId: string): Promise<RealizedT
   }
 
   return (data || []).map((item: any) => ({
-    id: item.id,
+    id: String(item.id),
     code: item.code,
     name: item.name,
     buyDate: item.buy_date,
@@ -96,23 +130,23 @@ export async function fetchTradesFromSupabase(userId: string): Promise<RealizedT
     shares: Number(item.shares),
     buyPrice: Number(item.buy_price),
     sellPrice: Number(item.sell_price),
-    isDayTrade: item.is_day_trade,
+    isDayTrade: Boolean(item.is_day_trade),
     netProfit: Number(item.net_profit),
     market: item.market,
     currency: item.currency,
-    isDCA: item.is_dca,
-    isETF: item.is_etf,
+    isDCA: Boolean(item.is_dca),
+    isETF: Boolean(item.is_etf),
     taxRate: Number(item.tax_rate),
-    brokerId: item.broker_id,
-    brokerName: item.broker_name,
+    brokerId: item.broker_id || '',
+    brokerName: item.broker_name || '',
     grossRevenue: Number(item.gross_revenue),
     tax: Number(item.tax),
     originalSellFee: Number(item.original_sell_fee),
     discountedSellFee: Number(item.discounted_sell_fee),
     rebateAmount: Number(item.rebate_amount),
-    rebateType: item.rebate_type,
-    rebateDesc: item.rebate_desc,
-    isRebated: item.is_rebated,
+    rebateType: item.rebate_type || '',
+    rebateDesc: item.rebate_desc || '',
+    isRebated: Boolean(item.is_rebated),
   }));
 }
 
@@ -120,10 +154,12 @@ export async function fetchTradesFromSupabase(userId: string): Promise<RealizedT
  * 新增歷史成交紀錄至 Supabase
  */
 export async function saveTradeToSupabase(userId: string, item: RealizedTrade) {
+  if (!userId || userId === 'guest') return;
+
   const { error } = await supabase
     .from('trades')
     .upsert({
-      id: item.id,
+      id: String(item.id),
       user_id: userId,
       code: item.code,
       name: item.name,
@@ -153,5 +189,20 @@ export async function saveTradeToSupabase(userId: string, item: RealizedTrade) {
 
   if (error) {
     console.warn('儲存歷史紀錄至 Supabase 失敗:', error.message);
+  }
+}
+
+/**
+ * 從 Supabase 刪除歷史成交紀錄
+ */
+export async function deleteTradeFromSupabase(id: string) {
+  if (!id) return;
+  const { error } = await supabase
+    .from('trades')
+    .delete()
+    .eq('id', String(id));
+
+  if (error) {
+    console.warn('刪除 Supabase 歷史紀錄失敗:', error.message);
   }
 }
